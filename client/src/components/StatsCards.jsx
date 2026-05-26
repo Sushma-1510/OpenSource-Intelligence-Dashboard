@@ -46,13 +46,6 @@ const StatsCards = ({ stats, loading }) => {
       colorClass: 'text-orange-500 bg-orange-50 dark:bg-orange-950/20 border-orange-100 dark:border-orange-950/40',
     },
     {
-      title: 'Primary Language',
-      value: stats ? stats.mostPopularLanguage : 'N/A',
-      description: 'Top tag in repository databases',
-      icon: Code2,
-      colorClass: 'text-sky-500 bg-sky-50 dark:bg-sky-950/20 border-sky-100 dark:border-sky-950/40',
-    },
-    {
       title: 'Most Active Subreddit',
       value: stats ? stats.mostActiveSubreddit : 'N/A',
       description: 'Subreddit with top post metrics',
@@ -62,7 +55,7 @@ const StatsCards = ({ stats, loading }) => {
   ];
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
       {cardsData.map((card, i) => {
         const IconComponent = card.icon;
         
