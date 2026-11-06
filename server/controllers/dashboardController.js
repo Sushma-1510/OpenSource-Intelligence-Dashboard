@@ -1,6 +1,9 @@
 const Repository = require('../models/Repository');
 const RedditPost = require('../models/RedditPost');
+const SyncLog = require('../models/SyncLog');
+const RepoSnapshot = require('../models/RepoSnapshot');
 const logger = require('../middleware/logger');
+const { buildRepoQuery, buildRedditQuery } = require('../utils/queryFilters');
 
 /**
  * Controller to handle complex data aggregation and analytical insights.
@@ -12,48 +15,11 @@ class DashboardController {
    */
   async getAnalytics(req, res, next) {
     try {
-      const {
-        search,
-        redditSearch,
-        language,
-        minStars,
-        maxStars,
-        minForks,
-        subreddit
-      } = req.query;
-
-      // Build GitHub Repository filters match query
-      const repoQuery = {};
-      if (search) {
-        repoQuery.$or = [
-          { name: { $regex: search, $options: 'i' } },
-          { fullName: { $regex: search, $options: 'i' } },
-          { description: { $regex: search, $options: 'i' } }
-        ];
-      }
-      if (language) {
-        repoQuery.language = { $regex: new RegExp(`^${language}$`, 'i') };
-      }
-      if (minStars || maxStars) {
-        repoQuery.stars = {};
-        if (minStars) repoQuery.stars.$gte = parseInt(minStars);
-        if (maxStars) repoQuery.stars.$lte = parseInt(maxStars);
-      }
-      if (minForks) {
-        repoQuery.forks = { $gte: parseInt(minForks) };
-      }
-
-      // Build Reddit Post filters match query
-      const redditQuery = {};
-      if (redditSearch) {
-        redditQuery.$or = [
-          { title: { $regex: redditSearch, $options: 'i' } },
-          { author: { $regex: redditSearch, $options: 'i' } }
-        ];
-      }
-      if (subreddit) {
-        redditQuery.subreddit = subreddit.toLowerCase().trim();
-      }
+      const repoQuery = buildRepoQuery(req.query);
+      const redditQuery = buildRedditQuery({
+        search: req.query.redditSearch,
+        subreddit: req.query.subreddit,
+      });
 
       logger.info(`[DashboardController] Compiling aggregation charts with filters - Repos: ${JSON.stringify(repoQuery)}, Reddit: ${JSON.stringify(redditQuery)}`);
 
@@ -218,48 +184,11 @@ class DashboardController {
    */
   async getInsights(req, res, next) {
     try {
-      const {
-        search,
-        redditSearch,
-        language,
-        minStars,
-        maxStars,
-        minForks,
-        subreddit
-      } = req.query;
-
-      // Build GitHub Repository filters match query
-      const repoQuery = {};
-      if (search) {
-        repoQuery.$or = [
-          { name: { $regex: search, $options: 'i' } },
-          { fullName: { $regex: search, $options: 'i' } },
-          { description: { $regex: search, $options: 'i' } }
-        ];
-      }
-      if (language) {
-        repoQuery.language = { $regex: new RegExp(`^${language}$`, 'i') };
-      }
-      if (minStars || maxStars) {
-        repoQuery.stars = {};
-        if (minStars) repoQuery.stars.$gte = parseInt(minStars);
-        if (maxStars) repoQuery.stars.$lte = parseInt(maxStars);
-      }
-      if (minForks) {
-        repoQuery.forks = { $gte: parseInt(minForks) };
-      }
-
-      // Build Reddit Post filters match query
-      const redditQuery = {};
-      if (redditSearch) {
-        redditQuery.$or = [
-          { title: { $regex: redditSearch, $options: 'i' } },
-          { author: { $regex: redditSearch, $options: 'i' } }
-        ];
-      }
-      if (subreddit) {
-        redditQuery.subreddit = subreddit.toLowerCase().trim();
-      }
+      const repoQuery = buildRepoQuery(req.query);
+      const redditQuery = buildRedditQuery({
+        search: req.query.redditSearch,
+        subreddit: req.query.subreddit,
+      });
 
       logger.info(`[DashboardController] Compiling heuristic insights with filters - Repos: ${JSON.stringify(repoQuery)}, Reddit: ${JSON.stringify(redditQuery)}`);
 
@@ -343,6 +272,36 @@ class DashboardController {
       });
     } catch (error) {
       logger.error(`[DashboardController] Error generating insights: ${error.message}`);
+      next(error);
+    }
+  }
+
+  /**
+   * Data freshness and recent ingestion runs.
+   * Route: GET /api/dashboard/sync-logs?limit=20
+   */
+  async getSyncLogs(req, res, next) {
+    try {
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+      const [logs, lastGithub, lastReddit, snapshotCount] = await Promise.all([
+        SyncLog.find().sort({ createdAt: -1 }).limit(limit).lean(),
+        SyncLog.findOne({ source: 'github', status: { $ne: 'failed' } }).sort({ createdAt: -1 }).lean(),
+        SyncLog.findOne({ source: 'reddit', status: { $ne: 'failed' } }).sort({ createdAt: -1 }).lean(),
+        RepoSnapshot.estimatedDocumentCount(),
+      ]);
+
+      res.status(200).json({
+        success: true,
+        freshness: {
+          github: lastGithub?.finishedAt || null,
+          reddit: lastReddit?.finishedAt || null,
+        },
+        snapshotCount,
+        count: logs.length,
+        data: logs,
+      });
+    } catch (error) {
+      logger.error(`[DashboardController] Error fetching sync logs: ${error.message}`);
       next(error);
     }
   }

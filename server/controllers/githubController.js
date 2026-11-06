@@ -1,7 +1,9 @@
 const Repository = require('../models/Repository');
 const Favorite = require('../models/Favorite');
+const RepoSnapshot = require('../models/RepoSnapshot');
 const githubService = require('../services/githubService');
 const logger = require('../middleware/logger');
+const { buildRepoQuery, parsePagination, MAX_PAGE_SIZE } = require('../utils/queryFilters');
 
 /**
  * Controller to handle GitHub repository endpoints.
@@ -16,43 +18,8 @@ class GitHubController {
       // Ensure data is cached and fresh (non-blocking if already loaded once)
       await githubService.ensureDataFreshness();
 
-      const {
-        search,
-        language,
-        minStars,
-        maxStars,
-        minForks,
-        sort = 'stars',
-        order = 'desc',
-        page = 1,
-        limit = 10,
-      } = req.query;
-
-      // Build MongoDB query
-      const query = {};
-
-      // Search filters
-      if (search) {
-        query.$or = [
-          { name: { $regex: search, $options: 'i' } },
-          { fullName: { $regex: search, $options: 'i' } },
-          { description: { $regex: search, $options: 'i' } }
-        ];
-      }
-
-      if (language) {
-        query.language = { $regex: new RegExp(`^${language}$`, 'i') };
-      }
-
-      if (minStars || maxStars) {
-        query.stars = {};
-        if (minStars) query.stars.$gte = parseInt(minStars);
-        if (maxStars) query.stars.$lte = parseInt(maxStars);
-      }
-
-      if (minForks) {
-        query.forks = { $gte: parseInt(minForks) };
-      }
+      const { sort = 'stars', order = 'desc' } = req.query;
+      const query = buildRepoQuery(req.query);
 
       // Sorting map
       const validSortFields = ['stars', 'forks', 'updatedAt', 'issues', 'trendingScore'];
@@ -60,10 +27,7 @@ class GitHubController {
       const sortOrder = order === 'asc' ? 1 : -1;
       const sortQuery = { [sortField]: sortOrder };
 
-      // Pagination
-      const pageNum = Math.max(1, parseInt(page));
-      const limitNum = Math.max(1, parseInt(limit));
-      const skipNum = (pageNum - 1) * limitNum;
+      const { pageNum, limitNum, skipNum } = parsePagination(req.query);
 
       // Execute queries in parallel for better performance
       const [repos, total] = await Promise.all([
@@ -106,7 +70,7 @@ class GitHubController {
     try {
       await githubService.ensureDataFreshness();
 
-      const limit = parseInt(req.query.limit) || 10;
+      const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(req.query.limit, 10) || 10));
       
       const repos = await Repository.find({})
         .sort({ trendingScore: -1 })
@@ -207,22 +171,31 @@ class GitHubController {
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', 'attachment; filename=repositories.csv');
 
-        // CSV Header
-        const fields = ['Name', 'Full Name', 'Description', 'Stars', 'Forks', 'Open Issues', 'Language', 'Owner', 'URL', 'Created At'];
+        // Quote every cell, escape quotes, and neutralise spreadsheet formulas
+        // (a description starting with "=" would otherwise run in Excel).
+        const csvCell = (value) => {
+          let v = value === null || value === undefined ? '' : String(value);
+          v = v.replace(/\r?\n/g, ' ');
+          if (/^[=+\-@\t]/.test(v)) v = `'${v}`;
+          return `"${v.replace(/"/g, '""')}"`;
+        };
+
+        const fields = ['Name', 'Full Name', 'Description', 'Stars', 'Forks', 'Open Issues', 'Language', 'Owner', 'URL', 'Created At', 'Trending Score'];
         let csvContent = fields.join(',') + '\n';
 
         repos.forEach(repo => {
           const row = [
-            `"${repo.name.replace(/"/g, '""')}"`,
-            `"${repo.fullName.replace(/"/g, '""')}"`,
-            `"${(repo.description || '').replace(/"/g, '""').replace(/\n/g, ' ')}"`,
+            csvCell(repo.name),
+            csvCell(repo.fullName),
+            csvCell(repo.description),
             repo.stars,
             repo.forks,
             repo.issues,
-            `"${repo.language}"`,
-            `"${repo.owner}"`,
-            `"${repo.repoUrl}"`,
-            repo.createdAt.toISOString()
+            csvCell(repo.language),
+            csvCell(repo.owner),
+            csvCell(repo.repoUrl),
+            new Date(repo.createdAt).toISOString(),
+            repo.trendingScore,
           ];
           csvContent += row.join(',') + '\n';
         });
@@ -255,14 +228,14 @@ class GitHubController {
       logger.info(`[GitHubController] Fetching README for: ${repo.fullName}`);
 
       const headers = {
-        'User-Agent': 'OSINT-Dashboard-App/1.0.0',
+        'User-Agent': 'OpenSourceDashboard/1.0.0',
         'Accept': 'application/vnd.github.v3+json',
       };
 
       const axios = require('axios'); // Ensure axios is imported or loaded locally
 
       if (process.env.GITHUB_TOKEN) {
-        headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+        headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
       }
 
       try {
@@ -303,12 +276,12 @@ class GitHubController {
       logger.info(`[GitHubController] Fetching live repository: ${name}`);
 
       const headers = {
-        'User-Agent': 'OSINT-Dashboard-App/1.0.0',
+        'User-Agent': 'OpenSourceDashboard/1.0.0',
         'Accept': 'application/vnd.github.v3+json',
       };
 
       if (process.env.GITHUB_TOKEN) {
-        headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+        headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
       }
 
       const axios = require('axios');
@@ -399,6 +372,90 @@ class GitHubController {
       }
     } catch (error) {
       logger.error(`[GitHubController] Error in getLiveRepository: ${error.message}`);
+      next(error);
+    }
+  }
+
+  /**
+   * Daily star/fork history for one repository (time series).
+   * Routes: GET /api/github/repositories/:id/history?days=30
+   *         GET /api/github/history?fullName=owner/repo&days=30
+   */
+  async getRepositoryHistory(req, res, next) {
+    try {
+      const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+      const fullName = typeof req.query.fullName === 'string' ? req.query.fullName.trim() : '';
+      const repo = req.params.id
+        ? await Repository.findById(req.params.id).lean()
+        : fullName
+          ? await Repository.findOne({ fullName }).lean()
+          : null;
+      if (!repo) {
+        return res.status(404).json({ success: false, error: 'Repository not found.' });
+      }
+      const since = new Date(Date.now() - days * 86400000);
+      const points = await RepoSnapshot.find({ fullName: repo.fullName, day: { $gte: since } })
+        .sort({ day: 1 })
+        .select({ _id: 0, day: 1, stars: 1, forks: 1, issues: 1, trendingScore: 1 })
+        .lean();
+
+      res.status(200).json({ success: true, fullName: repo.fullName, days, count: points.length, data: points });
+    } catch (error) {
+      logger.error(`[GitHubController] Error fetching history: ${error.message}`);
+      next(error);
+    }
+  }
+
+  /**
+   * Fastest-growing repositories: star gain between the first and last
+   * snapshot inside the window.
+   * Route: GET /api/github/growth?days=7&limit=10
+   */
+  async getTopGainers(req, res, next) {
+    try {
+      const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 7));
+      const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+      const since = new Date(Date.now() - days * 86400000);
+
+      const gainers = await RepoSnapshot.aggregate([
+        { $match: { day: { $gte: since } } },
+        { $sort: { fullName: 1, day: 1 } },
+        {
+          $group: {
+            _id: '$fullName',
+            firstDay: { $first: '$day' },
+            lastDay: { $last: '$day' },
+            startStars: { $first: '$stars' },
+            endStars: { $last: '$stars' },
+            points: { $sum: 1 },
+          },
+        },
+        { $match: { points: { $gte: 2 } } },
+        {
+          $project: {
+            _id: 0,
+            fullName: '$_id',
+            firstDay: 1,
+            lastDay: 1,
+            startStars: 1,
+            endStars: 1,
+            starGain: { $subtract: ['$endStars', '$startStars'] },
+            growthPct: {
+              $cond: [
+                { $gt: ['$startStars', 0] },
+                { $round: [{ $multiply: [{ $divide: [{ $subtract: ['$endStars', '$startStars'] }, '$startStars'] }, 100] }, 2] },
+                0,
+              ],
+            },
+          },
+        },
+        { $sort: { starGain: -1 } },
+        { $limit: limit },
+      ]);
+
+      res.status(200).json({ success: true, days, count: gainers.length, data: gainers });
+    } catch (error) {
+      logger.error(`[GitHubController] Error computing top gainers: ${error.message}`);
       next(error);
     }
   }

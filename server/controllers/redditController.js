@@ -2,6 +2,7 @@ const RedditPost = require('../models/RedditPost');
 const Favorite = require('../models/Favorite');
 const redditService = require('../services/redditService');
 const logger = require('../middleware/logger');
+const { buildRedditQuery, parsePagination } = require('../utils/queryFilters');
 
 /**
  * Controller to handle Reddit discussions endpoints.
@@ -16,28 +17,8 @@ class RedditController {
       // Ensure cache is fresh
       await redditService.ensureDataFreshness();
 
-      const {
-        search,
-        subreddit,
-        sort = 'upvotes',
-        order = 'desc',
-        page = 1,
-        limit = 10,
-      } = req.query;
-
-      // Build MongoDB query
-      const query = {};
-
-      if (search) {
-        query.$or = [
-          { title: { $regex: search, $options: 'i' } },
-          { author: { $regex: search, $options: 'i' } }
-        ];
-      }
-
-      if (subreddit) {
-        query.subreddit = subreddit.toLowerCase().trim();
-      }
+      const { sort = 'upvotes', order = 'desc' } = req.query;
+      const query = buildRedditQuery(req.query);
 
       // Sort map
       const validSortFields = ['upvotes', 'comments', 'createdAt'];
@@ -45,10 +26,7 @@ class RedditController {
       const sortOrder = order === 'asc' ? 1 : -1;
       const sortQuery = { [sortField]: sortOrder };
 
-      // Pagination
-      const pageNum = Math.max(1, parseInt(page));
-      const limitNum = Math.max(1, parseInt(limit));
-      const skipNum = (pageNum - 1) * limitNum;
+      const { pageNum, limitNum, skipNum } = parsePagination(req.query);
 
       // Execute in parallel
       const [posts, total] = await Promise.all([
@@ -161,7 +139,7 @@ class RedditController {
 
       const axios = require('axios');
       const headers = {
-        'User-Agent': process.env.REDDIT_USER_AGENT || 'OSINT-Dashboard/1.0.0 (by Antigravity)',
+        'User-Agent': process.env.REDDIT_USER_AGENT || 'OpenSourceDashboard/1.0.0',
       };
 
       try {
@@ -229,7 +207,7 @@ class RedditController {
 
       const axios = require('axios');
       const headers = {
-        'User-Agent': process.env.REDDIT_USER_AGENT || 'OSINT-Dashboard/1.0.0 (by Antigravity)',
+        'User-Agent': process.env.REDDIT_USER_AGENT || 'OpenSourceDashboard/1.0.0',
       };
 
       let subreddit = name.trim();

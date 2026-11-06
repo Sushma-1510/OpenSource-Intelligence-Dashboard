@@ -6,6 +6,9 @@ const router = express.Router();
 // Define GitHub integration routes
 router.get('/repository/live', githubController.getLiveRepository.bind(githubController));
 router.get('/repositories', githubController.getRepositories.bind(githubController));
+router.get('/history', githubController.getRepositoryHistory.bind(githubController));
+router.get('/growth', githubController.getTopGainers.bind(githubController));
+router.get('/repositories/:id/history', githubController.getRepositoryHistory.bind(githubController));
 router.get('/trending', githubController.getTrending.bind(githubController));
 router.get('/export', githubController.exportRepositories.bind(githubController));
 router.post('/favorites', githubController.toggleFavorite.bind(githubController));
