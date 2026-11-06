@@ -1,171 +1,119 @@
-# Open Source Intelligence Dashboard (OSINT)
+# Open Source Intelligence Dashboard
 
-A production-quality MERN full-stack application that discovers, analyzes, and visualizes trending open-source projects from GitHub and forum discussions from Reddit in real-time.
+A MERN app that collects data on popular GitHub repositories and developer discussions on Reddit, stores it in MongoDB, and shows trends on a React dashboard.
 
-Features a curated, glassmorphic dark-mode dashboard styled with Tailwind CSS, utilizing high-performance native Recharts visualizations and custom server-side caching engines.
+The core of the project is a small data pipeline: **ingest → validate → store → snapshot → aggregate → serve**.
 
----
-
-## Technical Architecture
-
-The project has a clean separation of concerns, separating the backend Express server from the React client:
-
-```
-open-source-dashboard/
-│
-├── client/                     # Vite + React Frontend Dashboard
-│   ├── src/
-│   │   ├── components/         # Reusable presentation controls
-│   │   │   ├── Navbar.jsx      # Sticky top brand headers, toggles, bookmarks metrics
-│   │   │   ├── StatsCards.jsx  # Numerical metric aggregations
-│   │   │   ├── SearchBar.jsx   # Separate Git/Reddit search engines
-│   │   │   ├── Filters.jsx     # Accordion sliders, star filters, sorts selectors
-│   │   │   ├── RepoCard.jsx    # GitHub project presentation panels
-│   │   │   ├── RedditCard.jsx  # Forum timeline post items
-│   │   │   ├── Charts.jsx      # Recharts visualizations layouts
-│   │   │   └── LoadingSpinner.jsx # Fluid CSS loading skeletons
-│   │   ├── context/
-│   │   │   └── DashboardContext.jsx # Central state, theme switches, bookmarks sync
-│   │   ├── hooks/
-│   │   │   ├── useRepositories.js  # Debounced custom hook for Git endpoints
-│   │   │   └── useRedditPosts.js   # Debounced custom hook for Reddit threads
-│   │   ├── services/
-│   │   │   └── api.js          # Axios network instance config
-│   │   ├── App.jsx             # Root layout component
-│   │   ├── main.jsx            # DOM compiler mount
-│   │   └── index.css           # Styling sheets & custom classes
-│   ├── tailwind.config.js      # Custom theme setup
-│   └── postcss.config.js       # CSS pipeline controls
-│
-└── server/                     # Node.js + Express + MongoDB Server
-    ├── config/
-    │   └── db.js               # Mongoose retry database connector
-    ├── controllers/
-    │   ├── githubController.js # Searches, filters, toggles favorites, CSV exports
-    │   ├── redditController.js # Handles Reddit discussions searches & bookmarks
-    │   └── dashboardController.js # MongoDB aggregation analytical chart metrics
-    ├── middleware/
-    │   ├── errorHandler.js     # Production-grade centralized catch errors
-    │   └── logger.js           # Styled stdout logging outputs
-    ├── models/
-    │   ├── Repository.js       # Repository text search schemas
-    │   ├── RedditPost.js       # Reddit discussion timeline schemas
-    │   └── Favorite.js         # Polymorphic favorite mapping
-    ├── routes/
-    │   ├── githubRoutes.js     # GitHub paths
-    │   ├── redditRoutes.js     # Reddit paths
-    │   └── dashboardRoutes.js  # Dashboard aggregation paths
-    ├── services/
-    │   ├── githubService.js    # Git REST integrations, trending score, limit checks
-    │   └── redditService.js    # Concurrent multi-reddit JSON fetchers
-    ├── utils/
-    │   └── cacheManager.js     # Tracks cache logging & hourly invalidations
-    ├── .env                    # Environment credentials file
-    ├── server.js               # Express bootstrapper
-    └── verifyBackend.js        # Validation test suite
+```mermaid
+flowchart LR
+  A[GitHub Search API] --> C[Map + validate]
+  B[Reddit hot.json] --> C
+  C -- rejected --> L[(SyncLog)]
+  C -- valid --> D[(Repository / RedditPost)]
+  D --> S[(RepoSnapshot<br/>daily time series)]
+  D --> E[Aggregations]
+  S --> E
+  E --> F[Express API] --> G[React dashboard]
 ```
 
----
+## Features
 
-## Installation & Local Development
+- **Ingestion:** top repos (more than 1k stars) from the GitHub Search API, plus hot posts from 5 programming subreddits. Data refreshes hourly via a cache check; when the cache is stale, the refresh runs in the background so requests aren't blocked.
+- **Data quality:** every record is validated before it's written (required fields, valid URLs, numeric ranges, parseable dates). Bad records are skipped, counted, and sampled in a sync log instead of failing the whole batch.
+- **Idempotent bulk writes:** each run is a single `bulkWrite` upsert keyed on a natural ID (`fullName` for repos, `postUrl` for Reddit posts). Re-running a sync never creates duplicates.
+- **Time series:** one `RepoSnapshot` per repo per UTC day. This powers the "fastest growing" ranking and the per-repo star history chart.
+- **Retention:**
+  - Snapshots expire after 1 year (TTL index).
+  - Sync logs expire after 90 days.
+  - Reddit posts older than 30 days are purged, unless bookmarked.
+- **Audit trail:** `SyncLog` records the source, status (`success` / `partial` / `failed`), duration, and fetched/upserted/rejected/purged counts for every run.
+- **Trending score (0–100):** a weighted mix of log-scaled stars, log-scaled forks, and a recency factor with a 30-day half-life (see [Design notes](#design-notes)).
+- **Dashboard:** search and filters, language and subreddit breakdowns, star growth chart, data freshness, bookmarks, and CSV/JSON export.
 
-### Prerequisites
-* **Node.js** (v18.0.0 or higher recommended)
-* **MongoDB** running locally (`mongodb://127.0.0.1:27017/osint_dashboard`)
+## Tech stack
 
----
+React 19 + Vite, Tailwind CSS, Recharts · Node.js, Express, Mongoose · MongoDB · `node:test` for unit tests.
 
-### Step 1: Database Setup
-Make sure your MongoDB server is active on your machine.
-In a local environment, Mongoose connects directly to:
-`mongodb://127.0.0.1:27017/osint_dashboard`
+## Project structure
 
----
+```
+client/src/
+  components/        UI pieces (GrowthPanel, StatsCards, Filters, RepoCard, ...)
+  pages/Dashboard.jsx
+  hooks/, context/, services/api.js
+server/
+  services/          GitHub + Reddit ingestion (fetch, map, validate, bulk upsert, snapshot, log)
+  controllers/       request handlers and MongoDB aggregations
+  models/            Repository, RedditPost, RepoSnapshot, SyncLog, Favorite
+  utils/             trendingScore, queryFilters (safe query building), validators, cacheManager
+  tests/             unit tests
+```
 
-### Step 2: Backend Installation & Setup
-1. Open a terminal and navigate to the server folder:
-   ```bash
-   cd server
-   ```
-2. Install packages:
-   ```bash
-   npm install
-   ```
-3. Set up credentials. Open the `.env` file and configure:
-   * `PORT=5000`
-   * `MONGODB_URI=mongodb://127.0.0.1:27017/osint_dashboard`
-   * **GitHub Token (Highly Recommended)**: Generate a Personal Access Token on GitHub and paste it in `GITHUB_TOKEN=`. Without this, GitHub API limits unauthenticated IP requests to 60/hour. With a token, it scales to 5,000/hour.
-4. Run the validation suite to assert database connection:
-   ```bash
-   node verifyBackend.js
-   ```
-5. Launch the backend server in development hot-reload mode:
-   ```bash
-   npm run dev
-   ```
+## Running locally
 
----
+Prerequisites: Node.js 18+ and MongoDB running locally (or a MongoDB Atlas connection string).
 
-### Step 3: Frontend Installation & Setup
-1. Open a separate terminal and navigate to the client folder:
-   ```bash
-   cd client
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Boot the Vite React development server:
-   ```bash
-   npm run dev
-   ```
-4. Access the premium dashboard: `http://localhost:5173`
+```bash
+# backend
+cd server
+cp .env.example .env        # then fill in GITHUB_TOKEN (optional but recommended)
+npm install
+npm test                    # unit tests
+npm run dev                 # http://localhost:5000
 
----
+# frontend (new terminal)
+cd client
+npm install
+npm run dev                 # http://localhost:5173
+```
 
-## Key Features Guide
+Without `GITHUB_TOKEN`, GitHub allows 60 requests per hour; with a token, the limit is 5,000.
 
-* **Trending Score Calculations**:
-  GitHub repositories are compiled with an advanced dynamic weighting formula:
-  $$\text{Trending Score} = (\text{stars} \times 0.5) + (\text{forks} \times 0.2) + (\text{watchers} \times 0.2) + (\text{recent\_activity} \times 0.1)$$
-  *Where `recent_activity` parses update dates from 0-100 pts.*
-* **Local CSV/JSON Exports**:
-  Clicking the export tags instantly issues server-compiled spreadsheets or clean raw JSON formats for local analytical audits.
-* **Polymorphic Bookmarks**:
-  Click the star badges on GitHub cards or Reddit discussion items. The state is instantly written to Mongoose polymorphic tables and mirrored across the dashboard.
-* **Central Insights Bar**:
-  Heuristic analysis aggregates database language spreads, react framework densities, and AI forums keywords to dynamically output core technical summaries.
+## API
 
----
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/github/repositories` | Search, filter, sort, paginate repos (`search`, `language`, `minStars`, `maxStars`, `minForks`, `sort`, `order`, `page`, `limit`≤100) |
+| GET | `/api/github/trending` | Top repos by trending score |
+| GET | `/api/github/growth?days=7` | Fastest-growing repos by star gain in the window |
+| GET | `/api/github/history?fullName=owner/repo&days=30` | Daily star/fork history for one repo |
+| GET | `/api/github/export?format=csv` | Export all repos as CSV or JSON |
+| GET | `/api/reddit/posts` | Search, filter, paginate Reddit posts |
+| GET | `/api/dashboard/analytics` | Totals and chart aggregations |
+| GET | `/api/dashboard/insights` | Rule-based summary insights |
+| GET | `/api/dashboard/sync-logs` | Recent ingestion runs and data freshness |
+| POST/GET | `/api/github/favorites`, `/api/reddit/favorites` | Bookmarks |
 
-## Production Deployment Guide
+## Design notes
 
-### Backend Deployment (Render.com)
-1. Push your server files to a GitHub Repository.
-2. Log into Render.com and create a new **Web Service**.
-3. Select your repository. Configure:
-   * **Environment**: `Node`
-   * **Build Command**: `npm install`
-   * **Start Command**: `node server.js`
-4. Add **Environment Variables**:
-   * `PORT=10000` (Render binds automatically)
-   * `NODE_ENV=production`
-   * `MONGODB_URI=mongodb+srv://<user>:<password>@cluster.mongodb.net/osint_dashboard` (Use MongoDB Atlas)
-   * `GITHUB_TOKEN=<your_token>`
-   * `CLIENT_URL=https://your-app.vercel.app` (Your frontend domain)
-5. Hit deploy. Render will compile and spin up the backend service.
+**Why the trending score is log-scaled.** An earlier version used `stars*0.5 + forks*0.2 + watchers*0.2 + activity*0.1`. Because raw star counts are in the thousands while activity maxed out at 10 points, the ranking was effectively just "sort by stars". Also, in the GitHub Search API `watchers_count` equals `stargazers_count`, so stars were counted twice. The current version:
 
----
+1. Puts stars and forks on a log10 scale normalized to 0–1, since popularity is heavy-tailed.
+2. Drops watchers.
+3. Replaces fixed recency buckets with exponential decay (30-day half-life).
 
-### Frontend Deployment (Vercel)
-1. Push your client files to your GitHub Repository.
-2. Log into Vercel.com and click **Add New Project**.
-3. Link your repository.
-4. Select the `client` directory as the project Root.
-5. In Vercel Build configurations, set:
-   * **Framework Preset**: `Vite`
-   * **Build Command**: `npm run build`
-   * **Output Directory**: `dist`
-6. Add Vercel Environment Variables:
-   * `VITE_API_URL=https://your-backend.onrender.com/api` (The deployed Render server API route)
-7. Click deploy. Your premium React dashboard goes live instantly!
+As a result, an actively maintained 20k-star repo can outrank an abandoned 60k-star repo (covered by a unit test).
+
+**Why daily snapshots.** The `Repository` collection only holds current values. Growth questions ("which repos gained the most stars this week?") need history. Snapshots are upserted on `(fullName, day)`, so multiple syncs in a day just update that day's point.
+
+**Safe querying.** All user-supplied search text is regex-escaped and type-checked before reaching MongoDB. This prevents regex injection and `?search[$ne]=` operator injection. Page size is capped at 100. CSV export neutralizes spreadsheet formula injection.
+
+## Limitations / next steps
+
+- Only the top 50 repos (one Search API page) are synced; paging through more would need rate-limit-aware scheduling.
+- Reddit is read through public JSON endpoints. Production use should switch to Reddit's OAuth API.
+- Syncs are triggered by incoming requests. A scheduled job (cron or a queue worker) would make snapshot timing predictable.
+- Bookmarks are global (no user accounts yet).
+
+## Deployment
+
+- **Backend (e.g. Render):**
+  - Build command: `npm install`; start command: `node server.js`.
+  - Set `MONGODB_URI` (Atlas), `GITHUB_TOKEN`, `CLIENT_URL` and `NODE_ENV=production`.
+- **Frontend (e.g. Vercel):**
+  - Root directory: `client`; preset: Vite.
+  - Set `VITE_API_URL=https://<your-backend>/api`.
+
+## License
+
+MIT
