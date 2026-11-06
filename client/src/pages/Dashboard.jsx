@@ -3,6 +3,7 @@ import { DashboardContext } from '../context/DashboardContext';
 import { useRepositories } from '../hooks/useRepositories';
 import { useRedditPosts } from '../hooks/useRedditPosts';
 import StatsCards from '../components/StatsCards';
+import GrowthPanel from '../components/GrowthPanel';
 import Filters from '../components/Filters';
 import RepoCard from '../components/RepoCard';
 import RedditCard from '../components/RedditCard';
@@ -349,6 +350,9 @@ const Dashboard = () => {
 
       {/* 2. Statistical Metrics Cards */}
       <StatsCards stats={analytics?.stats} loading={loadingAnalytics} />
+
+      {/* 2b. Time-series growth from daily snapshots */}
+      {!showBookmarksOnly && <GrowthPanel />}
 
       {/* 3. Global Filters Pane */}
       <Filters />

@@ -1,5 +1,7 @@
 const Repository = require('../models/Repository');
 const RedditPost = require('../models/RedditPost');
+const SyncLog = require('../models/SyncLog');
+const RepoSnapshot = require('../models/RepoSnapshot');
 const logger = require('../middleware/logger');
 const { buildRepoQuery, buildRedditQuery } = require('../utils/queryFilters');
 
@@ -270,6 +272,36 @@ class DashboardController {
       });
     } catch (error) {
       logger.error(`[DashboardController] Error generating insights: ${error.message}`);
+      next(error);
+    }
+  }
+
+  /**
+   * Data freshness and recent ingestion runs.
+   * Route: GET /api/dashboard/sync-logs?limit=20
+   */
+  async getSyncLogs(req, res, next) {
+    try {
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+      const [logs, lastGithub, lastReddit, snapshotCount] = await Promise.all([
+        SyncLog.find().sort({ createdAt: -1 }).limit(limit).lean(),
+        SyncLog.findOne({ source: 'github', status: { $ne: 'failed' } }).sort({ createdAt: -1 }).lean(),
+        SyncLog.findOne({ source: 'reddit', status: { $ne: 'failed' } }).sort({ createdAt: -1 }).lean(),
+        RepoSnapshot.estimatedDocumentCount(),
+      ]);
+
+      res.status(200).json({
+        success: true,
+        freshness: {
+          github: lastGithub?.finishedAt || null,
+          reddit: lastReddit?.finishedAt || null,
+        },
+        snapshotCount,
+        count: logs.length,
+        data: logs,
+      });
+    } catch (error) {
+      logger.error(`[DashboardController] Error fetching sync logs: ${error.message}`);
       next(error);
     }
   }

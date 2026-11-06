@@ -1,5 +1,6 @@
 const Repository = require('../models/Repository');
 const Favorite = require('../models/Favorite');
+const RepoSnapshot = require('../models/RepoSnapshot');
 const githubService = require('../services/githubService');
 const logger = require('../middleware/logger');
 const { buildRepoQuery, parsePagination, MAX_PAGE_SIZE } = require('../utils/queryFilters');
@@ -371,6 +372,90 @@ class GitHubController {
       }
     } catch (error) {
       logger.error(`[GitHubController] Error in getLiveRepository: ${error.message}`);
+      next(error);
+    }
+  }
+
+  /**
+   * Daily star/fork history for one repository (time series).
+   * Routes: GET /api/github/repositories/:id/history?days=30
+   *         GET /api/github/history?fullName=owner/repo&days=30
+   */
+  async getRepositoryHistory(req, res, next) {
+    try {
+      const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+      const fullName = typeof req.query.fullName === 'string' ? req.query.fullName.trim() : '';
+      const repo = req.params.id
+        ? await Repository.findById(req.params.id).lean()
+        : fullName
+          ? await Repository.findOne({ fullName }).lean()
+          : null;
+      if (!repo) {
+        return res.status(404).json({ success: false, error: 'Repository not found.' });
+      }
+      const since = new Date(Date.now() - days * 86400000);
+      const points = await RepoSnapshot.find({ fullName: repo.fullName, day: { $gte: since } })
+        .sort({ day: 1 })
+        .select({ _id: 0, day: 1, stars: 1, forks: 1, issues: 1, trendingScore: 1 })
+        .lean();
+
+      res.status(200).json({ success: true, fullName: repo.fullName, days, count: points.length, data: points });
+    } catch (error) {
+      logger.error(`[GitHubController] Error fetching history: ${error.message}`);
+      next(error);
+    }
+  }
+
+  /**
+   * Fastest-growing repositories: star gain between the first and last
+   * snapshot inside the window.
+   * Route: GET /api/github/growth?days=7&limit=10
+   */
+  async getTopGainers(req, res, next) {
+    try {
+      const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 7));
+      const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+      const since = new Date(Date.now() - days * 86400000);
+
+      const gainers = await RepoSnapshot.aggregate([
+        { $match: { day: { $gte: since } } },
+        { $sort: { fullName: 1, day: 1 } },
+        {
+          $group: {
+            _id: '$fullName',
+            firstDay: { $first: '$day' },
+            lastDay: { $last: '$day' },
+            startStars: { $first: '$stars' },
+            endStars: { $last: '$stars' },
+            points: { $sum: 1 },
+          },
+        },
+        { $match: { points: { $gte: 2 } } },
+        {
+          $project: {
+            _id: 0,
+            fullName: '$_id',
+            firstDay: 1,
+            lastDay: 1,
+            startStars: 1,
+            endStars: 1,
+            starGain: { $subtract: ['$endStars', '$startStars'] },
+            growthPct: {
+              $cond: [
+                { $gt: ['$startStars', 0] },
+                { $round: [{ $multiply: [{ $divide: [{ $subtract: ['$endStars', '$startStars'] }, '$startStars'] }, 100] }, 2] },
+                0,
+              ],
+            },
+          },
+        },
+        { $sort: { starGain: -1 } },
+        { $limit: limit },
+      ]);
+
+      res.status(200).json({ success: true, days, count: gainers.length, data: gainers });
+    } catch (error) {
+      logger.error(`[GitHubController] Error computing top gainers: ${error.message}`);
       next(error);
     }
   }

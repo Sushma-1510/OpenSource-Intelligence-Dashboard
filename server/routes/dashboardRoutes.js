@@ -6,5 +6,6 @@ const router = express.Router();
 // Define general Dashboard and Analytics routes
 router.get('/analytics', dashboardController.getAnalytics.bind(dashboardController));
 router.get('/insights', dashboardController.getInsights.bind(dashboardController));
+router.get('/sync-logs', dashboardController.getSyncLogs.bind(dashboardController));
 
 module.exports = router;
