@@ -161,7 +161,7 @@ class RedditController {
 
       const axios = require('axios');
       const headers = {
-        'User-Agent': process.env.REDDIT_USER_AGENT || 'OSINT-Dashboard/1.0.0 (by Antigravity)',
+        'User-Agent': process.env.REDDIT_USER_AGENT || 'OpenSourceDashboard/1.0.0',
       };
 
       try {
@@ -229,7 +229,7 @@ class RedditController {
 
       const axios = require('axios');
       const headers = {
-        'User-Agent': process.env.REDDIT_USER_AGENT || 'OSINT-Dashboard/1.0.0 (by Antigravity)',
+        'User-Agent': process.env.REDDIT_USER_AGENT || 'OpenSourceDashboard/1.0.0',
       };
 
       let subreddit = name.trim();

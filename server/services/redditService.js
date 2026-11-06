@@ -14,7 +14,7 @@ class RedditService {
     logger.info(`[RedditService] Starting Reddit sync for subreddits: ${SUBREDDITS.join(', ')}...`);
 
     const headers = {
-      'User-Agent': process.env.REDDIT_USER_AGENT || 'OSINT-Dashboard/1.0.0 (by Antigravity)',
+      'User-Agent': process.env.REDDIT_USER_AGENT || 'OpenSourceDashboard/1.0.0',
     };
 
     // If developer set API client credentials, we could use OAuth, but Reddit's public .json
