@@ -1,137 +1,163 @@
 const axios = require('axios');
 const Repository = require('../models/Repository');
+const RepoSnapshot = require('../models/RepoSnapshot');
+const { startOfUtcDay } = require('../models/RepoSnapshot');
+const SyncLog = require('../models/SyncLog');
 const { updateSyncTimestamp, isCacheExpired } = require('../utils/cacheManager');
+const { calculateTrendingScore } = require('../utils/trendingScore');
+const { validateRepository } = require('../utils/validators');
 const logger = require('../middleware/logger');
 
-/**
- * Calculates a repository's trending score based on stars, forks, watchers, and recent activity.
- */
-const calculateTrendingScore = (stars, forks, watchers, updatedAtStr) => {
-  const updatedAt = new Date(updatedAtStr);
-  const diffMs = Date.now() - updatedAt.getTime();
-  const diffDays = Math.max(0, diffMs / (1000 * 60 * 60 * 24)); // ensure positive days
-
-  let recentActivity = 0;
-  if (diffDays <= 1) recentActivity = 100;
-  else if (diffDays <= 7) recentActivity = 75;
-  else if (diffDays <= 30) recentActivity = 50;
-  else if (diffDays <= 90) recentActivity = 25;
-  else recentActivity = 0;
-
-  const score = (stars * 0.5) + (forks * 0.2) + (watchers * 0.2) + (recentActivity * 0.1);
-  return parseFloat(score.toFixed(2));
-};
+/** Maps a raw GitHub API item to our Repository shape. */
+const mapRepository = (repo, now = Date.now()) => ({
+  name: repo.name,
+  fullName: repo.full_name,
+  description: repo.description || '',
+  stars: repo.stargazers_count,
+  forks: repo.forks_count,
+  issues: repo.open_issues_count || 0,
+  // Note: in the Search API watchers_count mirrors stargazers_count.
+  watchers: repo.watchers_count || 0,
+  license: repo.license ? repo.license.spdx_id || repo.license.name : 'None',
+  language: repo.language || 'Unknown',
+  topics: repo.topics || [],
+  owner: repo.owner?.login,
+  avatar: repo.owner?.avatar_url || '',
+  repoUrl: repo.html_url,
+  createdAt: new Date(repo.created_at),
+  updatedAt: new Date(repo.updated_at),
+  trendingScore: calculateTrendingScore(
+    { stars: repo.stargazers_count, forks: repo.forks_count, updatedAt: repo.updated_at },
+    now
+  ),
+  lastSyncedAt: new Date(now),
+});
 
 /**
  * Service to manage GitHub integration.
  */
 class GitHubService {
   /**
-   * Fetches top repositories from GitHub search API, parses, and upserts into MongoDB.
-   * @param {number} page - Page number to fetch (for syncing more repositories)
+   * Fetches top repositories from the GitHub Search API, validates them,
+   * bulk-upserts into MongoDB, writes a daily snapshot per repo and records
+   * the run in SyncLog.
+   * @param {number} page - Page number to fetch
    * @param {number} perPage - Items per page (default 50)
-   * @returns {Promise<Array>} List of saved repositories
+   * @returns {Promise<{upserted:number, rejected:number}>}
    */
   async syncGitHubData(page = 1, perPage = 50) {
+    const startedAt = new Date();
+    const stats = { fetched: 0, upserted: 0, rejected: 0, rejectionSamples: [] };
     logger.info(`[GitHubService] Starting sync for page ${page} (${perPage} items)...`);
-    
+
     const headers = {
-      'User-Agent': 'OSINT-Dashboard-App/1.0.0',
+      'User-Agent': 'OpenSourceDashboard/1.0.0',
       'Accept': 'application/vnd.github.v3+json',
     };
 
     if (process.env.GITHUB_TOKEN) {
-      headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
-      logger.info('[GitHubService] Using authenticated requests with GITHUB_TOKEN.');
+      headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
     } else {
-      logger.warn('[GitHubService] No GITHUB_TOKEN set. Unauthenticated requests are subject to strict rate limits.');
+      logger.warn('[GitHubService] No GITHUB_TOKEN set. Unauthenticated requests are limited to 60/hour.');
     }
 
     try {
       const response = await axios.get('https://api.github.com/search/repositories', {
         headers,
-        params: {
-          q: 'stars:>1000',
-          sort: 'stars',
-          order: 'desc',
-          page,
-          per_page: perPage,
-        },
+        timeout: 15000,
+        params: { q: 'stars:>1000', sort: 'stars', order: 'desc', page, per_page: perPage },
       });
 
-      // Handle GitHub API rate-limit headers
       const rateLimitRemaining = response.headers['x-ratelimit-remaining'];
       const rateLimitReset = response.headers['x-ratelimit-reset'];
       logger.info(`[GitHubService] API Rate Limit Remaining: ${rateLimitRemaining}`);
-      
-      if (rateLimitRemaining && parseInt(rateLimitRemaining) < 5) {
-        const resetTime = new Date(parseInt(rateLimitReset) * 1000).toLocaleTimeString();
+      if (rateLimitRemaining && parseInt(rateLimitRemaining, 10) < 5) {
+        const resetTime = new Date(parseInt(rateLimitReset, 10) * 1000).toLocaleTimeString();
         logger.warn(`[GitHubService] Rate limit is critically low! Reset occurs at: ${resetTime}`);
       }
 
-      const repos = response.data.items || [];
-      logger.info(`[GitHubService] Fetched ${repos.length} repositories from API. Preparing database upsert...`);
+      const items = response.data.items || [];
+      stats.fetched = items.length;
 
-      const upsertPromises = repos.map(async (repo) => {
-        const score = calculateTrendingScore(
-          repo.stargazers_count,
-          repo.forks_count,
-          repo.watchers_count,
-          repo.updated_at
+      // Data-quality gate
+      const now = Date.now();
+      const valid = [];
+      for (const item of items) {
+        const record = mapRepository(item, now);
+        const errors = validateRepository(record);
+        if (errors.length) {
+          stats.rejected += 1;
+          if (stats.rejectionSamples.length < 5) {
+            stats.rejectionSamples.push(`${item.full_name || 'unknown'}: ${errors.join(', ')}`);
+          }
+        } else {
+          valid.push(record);
+        }
+      }
+
+      if (valid.length) {
+        // One round-trip instead of one query per repo
+        const result = await Repository.bulkWrite(
+          valid.map((r) => ({
+            updateOne: { filter: { fullName: r.fullName }, update: { $set: r }, upsert: true },
+          })),
+          { ordered: false }
         );
+        // inserted + already-existing (updated) documents
+        stats.upserted = (result.upsertedCount || 0) + (result.matchedCount || 0);
 
-        const repoData = {
-          name: repo.name,
-          fullName: repo.full_name,
-          description: repo.description || '',
-          stars: repo.stargazers_count,
-          forks: repo.forks_count,
-          issues: repo.open_issues_count || 0,
-          watchers: repo.watchers_count || 0,
-          license: repo.license ? repo.license.spdx_id || repo.license.name : 'None',
-          language: repo.language || 'Unknown',
-          topics: repo.topics || [],
-          owner: repo.owner.login,
-          avatar: repo.owner.avatar_url,
-          repoUrl: repo.html_url,
-          createdAt: new Date(repo.created_at),
-          updatedAt: new Date(repo.updated_at),
-          trendingScore: score,
-          lastSyncedAt: new Date(),
-        };
-
-        // Upsert by unique fullName
-        return Repository.findOneAndUpdate(
-          { fullName: repo.full_name },
-          repoData,
-          { upsert: true, new: true, runValidators: true }
+        // Daily time-series snapshot (idempotent: re-running today overwrites today's point)
+        const day = startOfUtcDay(new Date(now));
+        await RepoSnapshot.bulkWrite(
+          valid.map((r) => ({
+            updateOne: {
+              filter: { fullName: r.fullName, day },
+              update: {
+                $set: { stars: r.stars, forks: r.forks, issues: r.issues, trendingScore: r.trendingScore },
+              },
+              upsert: true,
+            },
+          })),
+          { ordered: false }
         );
-      });
+      }
 
-      const savedRepos = await Promise.all(upsertPromises);
-      logger.info(`[GitHubService] Successfully synced and updated ${savedRepos.length} repositories in database.`);
-      
-      // Update Cache State tracking
+      logger.info(`[GitHubService] Synced ${stats.upserted} repositories (${stats.rejected} rejected).`);
       await updateSyncTimestamp('github');
-      
-      return savedRepos;
+      await this.#writeLog(stats.rejected ? 'partial' : 'success', startedAt, stats);
+      return { upserted: stats.upserted, rejected: stats.rejected };
     } catch (error) {
-      // Robust rate limit and network error handling
       if (error.response) {
         const status = error.response.status;
         const msg = error.response.data?.message || '';
-        
         logger.error(`[GitHubService] API Request Failed: Status ${status} - ${msg}`);
-        
         if (status === 403 && msg.includes('rate limit')) {
           const resetHeader = error.response.headers['x-ratelimit-reset'];
-          const resetTime = resetHeader ? new Date(parseInt(resetHeader) * 1000).toLocaleTimeString() : 'unknown';
+          const resetTime = resetHeader ? new Date(parseInt(resetHeader, 10) * 1000).toLocaleTimeString() : 'unknown';
           logger.error(`[GitHubService] GitHub API Rate Limit Exceeded. Reset is at ${resetTime}.`);
         }
       } else {
         logger.error(`[GitHubService] Request connection error: ${error.message}`);
       }
+      await this.#writeLog('failed', startedAt, stats, error.message);
       throw error;
+    }
+  }
+
+  async #writeLog(status, startedAt, stats, error = '') {
+    try {
+      const finishedAt = new Date();
+      await SyncLog.create({
+        source: 'github',
+        status,
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt - startedAt,
+        ...stats,
+        error,
+      });
+    } catch (e) {
+      logger.error(`[GitHubService] Could not write sync log: ${e.message}`);
     }
   }
 
@@ -159,3 +185,4 @@ class GitHubService {
 }
 
 module.exports = new GitHubService();
+module.exports.mapRepository = mapRepository;
