@@ -1,6 +1,7 @@
 const Repository = require('../models/Repository');
 const RedditPost = require('../models/RedditPost');
 const logger = require('../middleware/logger');
+const { buildRepoQuery, buildRedditQuery } = require('../utils/queryFilters');
 
 /**
  * Controller to handle complex data aggregation and analytical insights.
@@ -12,48 +13,11 @@ class DashboardController {
    */
   async getAnalytics(req, res, next) {
     try {
-      const {
-        search,
-        redditSearch,
-        language,
-        minStars,
-        maxStars,
-        minForks,
-        subreddit
-      } = req.query;
-
-      // Build GitHub Repository filters match query
-      const repoQuery = {};
-      if (search) {
-        repoQuery.$or = [
-          { name: { $regex: search, $options: 'i' } },
-          { fullName: { $regex: search, $options: 'i' } },
-          { description: { $regex: search, $options: 'i' } }
-        ];
-      }
-      if (language) {
-        repoQuery.language = { $regex: new RegExp(`^${language}$`, 'i') };
-      }
-      if (minStars || maxStars) {
-        repoQuery.stars = {};
-        if (minStars) repoQuery.stars.$gte = parseInt(minStars);
-        if (maxStars) repoQuery.stars.$lte = parseInt(maxStars);
-      }
-      if (minForks) {
-        repoQuery.forks = { $gte: parseInt(minForks) };
-      }
-
-      // Build Reddit Post filters match query
-      const redditQuery = {};
-      if (redditSearch) {
-        redditQuery.$or = [
-          { title: { $regex: redditSearch, $options: 'i' } },
-          { author: { $regex: redditSearch, $options: 'i' } }
-        ];
-      }
-      if (subreddit) {
-        redditQuery.subreddit = subreddit.toLowerCase().trim();
-      }
+      const repoQuery = buildRepoQuery(req.query);
+      const redditQuery = buildRedditQuery({
+        search: req.query.redditSearch,
+        subreddit: req.query.subreddit,
+      });
 
       logger.info(`[DashboardController] Compiling aggregation charts with filters - Repos: ${JSON.stringify(repoQuery)}, Reddit: ${JSON.stringify(redditQuery)}`);
 
@@ -218,48 +182,11 @@ class DashboardController {
    */
   async getInsights(req, res, next) {
     try {
-      const {
-        search,
-        redditSearch,
-        language,
-        minStars,
-        maxStars,
-        minForks,
-        subreddit
-      } = req.query;
-
-      // Build GitHub Repository filters match query
-      const repoQuery = {};
-      if (search) {
-        repoQuery.$or = [
-          { name: { $regex: search, $options: 'i' } },
-          { fullName: { $regex: search, $options: 'i' } },
-          { description: { $regex: search, $options: 'i' } }
-        ];
-      }
-      if (language) {
-        repoQuery.language = { $regex: new RegExp(`^${language}$`, 'i') };
-      }
-      if (minStars || maxStars) {
-        repoQuery.stars = {};
-        if (minStars) repoQuery.stars.$gte = parseInt(minStars);
-        if (maxStars) repoQuery.stars.$lte = parseInt(maxStars);
-      }
-      if (minForks) {
-        repoQuery.forks = { $gte: parseInt(minForks) };
-      }
-
-      // Build Reddit Post filters match query
-      const redditQuery = {};
-      if (redditSearch) {
-        redditQuery.$or = [
-          { title: { $regex: redditSearch, $options: 'i' } },
-          { author: { $regex: redditSearch, $options: 'i' } }
-        ];
-      }
-      if (subreddit) {
-        redditQuery.subreddit = subreddit.toLowerCase().trim();
-      }
+      const repoQuery = buildRepoQuery(req.query);
+      const redditQuery = buildRedditQuery({
+        search: req.query.redditSearch,
+        subreddit: req.query.subreddit,
+      });
 
       logger.info(`[DashboardController] Compiling heuristic insights with filters - Repos: ${JSON.stringify(repoQuery)}, Reddit: ${JSON.stringify(redditQuery)}`);
 
